@@ -17,10 +17,43 @@ _preview_pipeline_lock = threading.Lock()
 def _select_device() -> str:
     import platform
 
+    try:
+        import torch  # type: ignore[import-not-found]
+    except Exception:
+        return "cpu"
+
     system = platform.system()
     if system == "Darwin" and platform.processor() == "arm":
-        return "mps"
-    return "cuda"
+        try:
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _resolve_pipeline(language: str, use_gpu: bool) -> Tuple[Any, bool]:
+    devices: List[str] = ["cpu"]
+    if use_gpu:
+        preferred = _select_device()
+        if preferred != "cpu":
+            devices.insert(0, preferred)
+
+    last_error: Optional[Exception] = None
+    for device in devices:
+        try:
+            return get_preview_pipeline(language, device), device != "cpu"
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError("Preview pipeline is unavailable") from last_error
 
 
 def _to_float32(audio_segment) -> np.ndarray:
@@ -115,15 +148,7 @@ def generate_preview_audio(
             total_steps=supertonic_total_steps,
         )
     else:
-        device = "cpu"
-        if use_gpu:
-            try:
-                device = _select_device()
-            except Exception:
-                device = "cpu"
-                use_gpu = False
-
-        pipeline = get_preview_pipeline(language, device)
+        pipeline, pipeline_uses_gpu = _resolve_pipeline(language, use_gpu)
         if pipeline is None:
             raise RuntimeError("Preview pipeline is unavailable")
 
@@ -131,7 +156,7 @@ def generate_preview_audio(
         if voice_spec and "*" in voice_spec:
             from abogen.voice_formulas import get_new_voice
 
-            voice_choice = get_new_voice(pipeline, voice_spec, use_gpu)
+            voice_choice = get_new_voice(pipeline, voice_spec, pipeline_uses_gpu)
 
         segments = pipeline(
             normalized_text,
